@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NFC Vault</title>
+<style>
+  :root { --bg:#f4f5f7; --card:#fff; --text:#16181d; --muted:#6b7280; --accent:#1fa65a; --danger:#d93636; --line:#e3e5ea; color-scheme: light; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1115; --card:#1a1d24; --text:#eceef2; --muted:#9097a3; --line:#2a2f39; color-scheme: dark; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); display:flex; justify-content:center; padding:24px 16px; }
+  .wrap { width:100%; max-width:420px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:14px; margin:0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px; margin-bottom:16px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:12px 0 6px; }
+  input, select { width:100%; padding:12px; font-size:16px; border-radius:10px; border:1px solid var(--line); background:var(--bg); color:var(--text); }
+  .row { display:flex; gap:8px; }
+  .row > * { flex:1; }
+  button { width:100%; padding:14px; font-size:16px; font-weight:600; border:0; border-radius:10px; background:var(--accent); color:#fff; margin-top:16px; cursor:pointer; }
+  button.small { width:auto; padding:8px 12px; font-size:13px; margin:0 0 0 6px; }
+  button.danger { background:var(--danger); }
+  button.ghost { background:var(--line); color:var(--text); }
+  button:disabled { opacity:.5; }
+  .big { font-size:40px; font-weight:700; text-align:center; margin:6px 0; }
+  .center { text-align:center; }
+  .muted { color:var(--muted); font-size:14px; }
+  .msg { margin-top:12px; font-size:14px; text-align:center; }
+  .err { color:var(--danger); }
+  .ok { color:var(--accent); }
+  .link { display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-top:1px solid var(--line); font-size:14px; }
+  .link:first-child { border-top:0; }
+  code { word-break:break-all; font-size:13px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ===================== OWNER ===================== -->
+  <div id="owner" class="hidden">
+    <h1>Vault owner</h1>
+    <p class="sub">Create access links for friends &amp; family.</p>
+
+    <div id="loginCard" class="card">
+      <label>Email</label>
+      <input id="email" type="email" autocomplete="username">
+      <label>Password</label>
+      <input id="pass" type="password" autocomplete="current-password">
+      <button id="loginBtn">Sign in</button>
+      <div id="loginMsg" class="msg err"></div>
+    </div>
+
+    <div id="panel" class="hidden">
+      <div class="card">
+        <label>Number of unlocks (leave empty = unlimited)</label>
+        <input id="uses" type="number" min="1" inputmode="numeric" placeholder="e.g. 3">
+        <label>Valid for (leave empty = no time limit)</label>
+        <div class="row">
+          <input id="dur" type="number" min="1" inputmode="numeric" placeholder="e.g. 24">
+          <select id="unit">
+            <option value="60000">minutes</option>
+            <option value="3600000" selected>hours</option>
+            <option value="86400000">days</option>
+          </select>
+        </div>
+        <button id="createBtn">Create link</button>
+        <div id="newLink" class="msg"></div>
+      </div>
+
+      <div class="card">
+        <button id="ownerLockBtn" class="danger" style="margin-top:0">Lock vault now</button>
+        <div id="ownerLockMsg" class="msg"></div>
+      </div>
+
+      <div class="card">
+        <div class="muted" style="margin-bottom:8px">Active links</div>
+        <div id="list" class="muted">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== GUEST ===================== -->
+  <div id="guest" class="hidden">
+    <h1>Vault access</h1>
+    <p class="sub">You've been given temporary access.</p>
+    <div class="card center">
+      <div id="gInfo" class="muted">Checking link…</div>
+      <div id="gUses" class="big"></div>
+      <button id="unlockBtn" class="hidden">UNLOCK</button>
+      <button id="lockBtn" class="hidden danger">LOCK</button>
+      <div id="gMsg" class="msg"></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// =============== EDIT THESE TWO LINES ===============
+const DB_URL  = "https://nfc-vault-cloudapp-default-rtdb.asia-southeast1.firebasedatabase.app";
+const API_KEY = "AIzaSyDxEepDf9mW2u7y52uAON_5jemsOKCTAZM";
+// ====================================================
+
+const NO_LIMIT_USES = 9999;
+const NO_LIMIT_TIME = 4102444800000; // year 2100
+const $ = id => document.getElementById(id);
+let idToken = null;
+
+function fmtExpiry(ms) {
+  if (ms >= NO_LIMIT_TIME) return "no time limit";
+  const left = ms - Date.now();
+  if (left <= 0) return "expired";
+  const m = Math.floor(left / 60000);
+  if (m < 60) return m + " min left";
+  const h = Math.floor(m / 60);
+  if (h < 48) return h + " h left";
+  return Math.floor(h / 24) + " days left";
+}
+function fmtUses(n) { return n >= NO_LIMIT_USES ? "unlimited" : n + " left"; }
+
+/* ------------------ routing ------------------ */
+const hash = location.hash.replace("#", "");
+if (!hash || hash === "owner") { $("owner").classList.remove("hidden"); initOwner(); }
+else { $("guest").classList.remove("hidden"); initGuest(hash); }
+
+/* ------------------ OWNER ------------------ */
+function initOwner() {
+  $("loginBtn").onclick = async () => {
+    $("loginMsg").textContent = "";
+    try {
+      const r = await fetch("https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=" + API_KEY, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: $("email").value, password: $("pass").value, returnSecureToken: true })
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error("Wrong email or password");
+      idToken = d.idToken;
+      $("loginCard").classList.add("hidden");
+      $("panel").classList.remove("hidden");
+      loadList();
+      setTimeout(() => location.reload(), 55 * 60 * 1000); // token lasts 1h
+    } catch (e) { $("loginMsg").textContent = e.message; }
+  };
+
+  $("ownerLockBtn").onclick = async () => {
+    const r = await fetch(`${DB_URL}/lock_event.json?auth=${idToken}`, {
+      method: "PUT",
+      body: JSON.stringify({ token: "owner", ts: { ".sv": "timestamp" } })
+    });
+    $("ownerLockMsg").className = r.ok ? "msg ok" : "msg err";
+    $("ownerLockMsg").textContent = r.ok ? "Lock command sent." : "Failed.";
+  };
+
+  $("createBtn").onclick = async () => {
+    const usesVal = parseInt($("uses").value, 10);
+    const durVal = parseInt($("dur").value, 10);
+    const uses_left = usesVal > 0 ? usesVal : NO_LIMIT_USES;
+    const expires_at = durVal > 0 ? Date.now() + durVal * parseInt($("unit").value, 10) : NO_LIMIT_TIME;
+
+    const arr = new Uint8Array(12); crypto.getRandomValues(arr);
+    const token = Array.from(arr, b => b.toString(36).padStart(2, "0")).join("").slice(0, 18);
+
+    const r = await fetch(`${DB_URL}/links/${token}.json?auth=${idToken}`, {
+      method: "PUT",
+      body: JSON.stringify({ uses_left, expires_at, created: Date.now() })
+    });
+    if (!r.ok) { $("newLink").innerHTML = '<span class="err">Could not create link</span>'; return; }
+
+    const url = location.origin + location.pathname + "#" + token;
+    $("newLink").innerHTML = `<code>${url}</code><br>
+      <button class="small" id="shareBtn">Share</button><button class="small ghost" id="copyBtn">Copy</button>`;
+    $("shareBtn").onclick = () => navigator.share ? navigator.share({ title: "Vault access", url }) : navigator.clipboard.writeText(url);
+    $("copyBtn").onclick = () => { navigator.clipboard.writeText(url); $("copyBtn").textContent = "Copied"; };
+    loadList();
+  };
+}
+
+async function loadList() {
+  const r = await fetch(`${DB_URL}/links.json?auth=${idToken}`);
+  const data = await r.json();
+  const box = $("list");
+  if (!data) { box.textContent = "No links yet."; return; }
+  box.innerHTML = "";
+  Object.entries(data).sort((a, b) => b[1].created - a[1].created).forEach(([tok, v]) => {
+    const row = document.createElement("div");
+    row.className = "link";
+    const dead = v.uses_left <= 0 || v.expires_at < Date.now();
+    row.innerHTML = `<div><code>…${tok.slice(-6)}</code><br>
+      <span class="muted">${dead ? "used up / expired" : fmtUses(v.uses_left) + " · " + fmtExpiry(v.expires_at)}</span></div>
+      <div><button class="small ghost">Copy</button><button class="small danger">Revoke</button></div>`;
+    const [copy, del] = row.querySelectorAll("button");
+    copy.onclick = () => { navigator.clipboard.writeText(location.origin + location.pathname + "#" + tok); copy.textContent = "Copied"; };
+    del.onclick = async () => { await fetch(`${DB_URL}/links/${tok}.json?auth=${idToken}`, { method: "DELETE" }); loadList(); };
+    box.appendChild(row);
+  });
+}
+
+/* ------------------ GUEST ------------------ */
+async function initGuest(token) {
+  async function refresh() {
+    const r = await fetch(`${DB_URL}/links/${token}.json`);
+    const v = await r.json();
+    if (!v) { $("gInfo").textContent = "This link is invalid or was revoked."; $("gUses").textContent = ""; $("unlockBtn").classList.add("hidden"); $("lockBtn").classList.add("hidden"); return null; }
+    const dead = v.uses_left <= 0 || v.expires_at <= Date.now();
+    $("gInfo").textContent = dead ? "This link is no longer active." : "Uses: " + fmtUses(v.uses_left) + " · " + fmtExpiry(v.expires_at);
+    $("gUses").textContent = "";
+    $("unlockBtn").classList.toggle("hidden", dead);
+    $("lockBtn").classList.remove("hidden");   // lock always available while link exists
+    return v;
+  }
+  await refresh();
+
+  $("unlockBtn").onclick = async () => {
+    $("gMsg").className = "msg"; $("gMsg").textContent = "";
+    const v = await refresh();
+    if (!v || v.uses_left <= 0 || v.expires_at <= Date.now()) return;
+    $("unlockBtn").disabled = true;
+    // Step 1: use up one unlock (Firebase checks the count and expiry)
+    const r1 = await fetch(`${DB_URL}/links/${token}.json`, {
+      method: "PATCH",
+      body: JSON.stringify({ uses_left: v.uses_left - 1, last_unlock: { ".sv": "timestamp" } })
+    });
+    // Step 2: send the unlock signal to the vault
+    let r = r1;
+    if (r1.ok) {
+      r = await fetch(`${DB_URL}/unlock_event.json`, {
+        method: "PUT",
+        body: JSON.stringify({ token, ts: { ".sv": "timestamp" } })
+      });
+    }
+    if (r.ok) {
+      $("gMsg").className = "msg ok";
+      $("gMsg").textContent = "Unlock sent. The vault opens in a few seconds. Press LOCK when you are done.";
+    } else {
+      $("gMsg").className = "msg err";
+      $("gMsg").textContent = "Denied. The link may have expired or run out.";
+    }
+    setTimeout(() => { $("unlockBtn").disabled = false; refresh(); }, 4000);
+  };
+
+  $("lockBtn").onclick = async () => {
+    $("lockBtn").disabled = true;
+    const r = await fetch(`${DB_URL}/lock_event.json`, {
+      method: "PUT",
+      body: JSON.stringify({ token, ts: { ".sv": "timestamp" } })
+    });
+    $("gMsg").className = r.ok ? "msg ok" : "msg err";
+    $("gMsg").textContent = r.ok ? "Lock sent. The vault locks in a few seconds." : "Could not send lock command.";
+    setTimeout(() => { $("lockBtn").disabled = false; }, 4000);
+  };
+}
+</script>
+</body>
+</html>
