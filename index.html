@@ -89,8 +89,7 @@
     <div class="card center">
       <div id="gInfo" class="muted">Checking link…</div>
       <div id="gUses" class="big"></div>
-      <button id="unlockBtn" class="hidden">UNLOCK</button>
-      <button id="lockBtn" class="hidden danger">LOCK</button>
+      <button id="toggleBtn" class="hidden">UNLOCK</button>
       <div id="gMsg" class="msg"></div>
     </div>
   </div>
@@ -200,57 +199,66 @@ async function loadList() {
 
 /* ------------------ GUEST ------------------ */
 async function initGuest(token) {
+  let state = "locked", busy = false;
+  const btn = $("toggleBtn"), msg = $("gMsg");
+  const getJson = async p => { try { return await (await fetch(`${DB_URL}/${p}.json`)).json(); } catch (e) { return null; } };
+  const send = (path, method, body) => fetch(`${DB_URL}/${path}.json`, { method, body: JSON.stringify(body) });
+  const stamp = { ".sv": "timestamp" };
+
+  function paint() {
+    btn.textContent = state === "unlocked" ? "LOCK" : "UNLOCK";
+    btn.className = state === "unlocked" ? "danger" : "";
+  }
   async function refresh() {
-    const r = await fetch(`${DB_URL}/links/${token}.json`);
-    const v = await r.json();
-    if (!v) { $("gInfo").textContent = "This link is invalid or was revoked."; $("gUses").textContent = ""; $("unlockBtn").classList.add("hidden"); $("lockBtn").classList.add("hidden"); return null; }
+    const v = await getJson("links/" + token);
+    if (!v) { $("gInfo").textContent = "This link is invalid or was revoked."; btn.classList.add("hidden"); return null; }
     const dead = v.uses_left <= 0 || v.expires_at <= Date.now();
-    $("gInfo").textContent = dead ? "This link is no longer active." : "Uses: " + fmtUses(v.uses_left) + " · " + fmtExpiry(v.expires_at);
-    $("gUses").textContent = "";
-    $("unlockBtn").classList.toggle("hidden", dead);
-    $("lockBtn").classList.remove("hidden");   // lock always available while link exists
+    $("gInfo").textContent = dead ? "This link is no longer active." : "Unlocks: " + fmtUses(v.uses_left) + " · " + fmtExpiry(v.expires_at);
+    const st = await getJson("status");
+    if (st && st.state) state = st.state;
+    btn.classList.toggle("hidden", dead && state !== "unlocked");
+    paint();
     return v;
   }
+  async function waitFor(want, prevTs) {
+    for (let i = 0; i < 10; i++) {
+      await new Promise(r => setTimeout(r, 1500));
+      const st = await getJson("status");
+      if (st && st.ts !== prevTs && st.state === want) return true;
+    }
+    return false;
+  }
+
+  btn.onclick = async () => {
+    if (busy) return;
+    busy = true; btn.disabled = true;
+    msg.className = "msg"; msg.textContent = "Sending to vault…";
+    try {
+      const prev = await getJson("status");
+      const prevTs = prev ? prev.ts : null;
+      let want;
+      if (state === "locked") {
+        const v = await refresh();
+        if (!v || v.uses_left <= 0 || v.expires_at <= Date.now()) throw new Error("This link is no longer active.");
+        const r1 = await send("links/" + token, "PATCH", { uses_left: v.uses_left - 1, last_unlock: stamp });
+        if (!r1.ok) throw new Error("Denied. The link may have expired or run out.");
+        const r2 = await send("unlock_event", "PUT", { token, ts: stamp });
+        if (!r2.ok) throw new Error("Could not reach the vault. Try again.");
+        want = "unlocked";
+      } else {
+        const r = await send("lock_event", "PUT", { token, ts: stamp });
+        if (!r.ok) throw new Error("Could not send the lock command. Try again.");
+        want = "locked";
+      }
+      if (!(await waitFor(want, prevTs))) throw new Error("Something went wrong: the vault did not confirm. Check it is powered and online, then try again.");
+      state = want;
+      msg.className = "msg ok";
+      msg.textContent = want === "unlocked" ? "Vault unlocked." : "Vault locked.";
+    } catch (e) { msg.className = "msg err"; msg.textContent = e.message; }
+    busy = false; btn.disabled = false;
+    await refresh();
+  };
   await refresh();
-
-  $("unlockBtn").onclick = async () => {
-    $("gMsg").className = "msg"; $("gMsg").textContent = "";
-    const v = await refresh();
-    if (!v || v.uses_left <= 0 || v.expires_at <= Date.now()) return;
-    $("unlockBtn").disabled = true;
-    // Step 1: use up one unlock (Firebase checks the count and expiry)
-    const r1 = await fetch(`${DB_URL}/links/${token}.json`, {
-      method: "PATCH",
-      body: JSON.stringify({ uses_left: v.uses_left - 1, last_unlock: { ".sv": "timestamp" } })
-    });
-    // Step 2: send the unlock signal to the vault
-    let r = r1;
-    if (r1.ok) {
-      r = await fetch(`${DB_URL}/unlock_event.json`, {
-        method: "PUT",
-        body: JSON.stringify({ token, ts: { ".sv": "timestamp" } })
-      });
-    }
-    if (r.ok) {
-      $("gMsg").className = "msg ok";
-      $("gMsg").textContent = "Unlock sent. The vault opens in a few seconds. Press LOCK when you are done.";
-    } else {
-      $("gMsg").className = "msg err";
-      $("gMsg").textContent = "Denied. The link may have expired or run out.";
-    }
-    setTimeout(() => { $("unlockBtn").disabled = false; refresh(); }, 4000);
-  };
-
-  $("lockBtn").onclick = async () => {
-    $("lockBtn").disabled = true;
-    const r = await fetch(`${DB_URL}/lock_event.json`, {
-      method: "PUT",
-      body: JSON.stringify({ token, ts: { ".sv": "timestamp" } })
-    });
-    $("gMsg").className = r.ok ? "msg ok" : "msg err";
-    $("gMsg").textContent = r.ok ? "Lock sent. The vault locks in a few seconds." : "Could not send lock command.";
-    setTimeout(() => { $("lockBtn").disabled = false; }, 4000);
-  };
 }
 </script>
 </body>
